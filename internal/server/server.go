@@ -157,6 +157,10 @@ func (s *Server) RegisterProcessor(processor job.Processor) {
 	s.registry.Register(processor)
 }
 
+func (s *Server) Router() http.Handler {
+	return s.httpServer.Handler
+}
+
 func (s *Server) setupHTTPServer() {
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
