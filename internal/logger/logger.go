@@ -30,6 +30,10 @@ func WithField(key string, value interface{}) *logrus.Entry {
 	return Log.WithField(key, value)
 }
 
+func WithError(err error) *logrus.Entry {
+	return Log.WithError(err)
+}
+
 func Info(args ...interface{}) {
 	Log.Info(args...)
 }

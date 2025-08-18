@@ -7,8 +7,6 @@ import (
 
 	"distributed-job-processor/internal/logger"
 	"distributed-job-processor/internal/storage"
-
-	"github.com/sirupsen/logrus"
 )
 
 type BullyElection struct {
