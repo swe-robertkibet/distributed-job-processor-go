@@ -1,0 +1,9 @@
+.env
+*.log
+dist/
+build/
+.DS_Store
+*.tmp
+*.swp
+.vscode/
+.idea/
