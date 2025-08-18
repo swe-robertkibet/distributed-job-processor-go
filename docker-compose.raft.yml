@@ -1,0 +1,102 @@
+version: '3.8'
+
+services:
+  job-processor-1:
+    build: .
+    ports:
+      - "8080:8080"
+      - "9090:9090"
+    environment:
+      - MONGODB_URI=${MONGODB_URI}
+      - MONGODB_DATABASE=${MONGODB_DATABASE:-jobprocessor}
+      - REDIS_ADDR=redis:6379
+      - NODE_ID=node-1
+      - WORKER_COUNT=10
+      - ELECTION_ALGORITHM=raft
+      - ELECTION_TIMEOUT=5s
+      - ELECTION_INTERVAL=2s
+      - LOAD_BALANCER_STRATEGY=round_robin
+      - RETRY_POLICY=exponential
+      - METRICS_ENABLED=true
+    depends_on:
+      - redis
+    volumes:
+      - ./.env:/root/.env:ro
+
+  job-processor-2:
+    build: .
+    ports:
+      - "8081:8080"
+      - "9091:9090"
+    environment:
+      - MONGODB_URI=${MONGODB_URI}
+      - MONGODB_DATABASE=${MONGODB_DATABASE:-jobprocessor}
+      - REDIS_ADDR=redis:6379
+      - NODE_ID=node-2
+      - WORKER_COUNT=10
+      - ELECTION_ALGORITHM=raft
+      - ELECTION_TIMEOUT=5s
+      - ELECTION_INTERVAL=2s
+      - LOAD_BALANCER_STRATEGY=round_robin
+      - RETRY_POLICY=exponential
+      - METRICS_ENABLED=true
+    depends_on:
+      - redis
+    volumes:
+      - ./.env:/root/.env:ro
+
+  job-processor-3:
+    build: .
+    ports:
+      - "8082:8080"
+      - "9092:9090"
+    environment:
+      - MONGODB_URI=${MONGODB_URI}
+      - MONGODB_DATABASE=${MONGODB_DATABASE:-jobprocessor}
+      - REDIS_ADDR=redis:6379
+      - NODE_ID=node-3
+      - WORKER_COUNT=10
+      - ELECTION_ALGORITHM=raft
+      - ELECTION_TIMEOUT=5s
+      - ELECTION_INTERVAL=2s
+      - LOAD_BALANCER_STRATEGY=round_robin
+      - RETRY_POLICY=exponential
+      - METRICS_ENABLED=true
+    depends_on:
+      - redis
+    volumes:
+      - ./.env:/root/.env:ro
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9093:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+
+volumes:
+  redis_data:
+  prometheus_data:
+  grafana_data:
