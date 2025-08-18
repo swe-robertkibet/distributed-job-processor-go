@@ -29,7 +29,7 @@ type Server struct {
 	storage      *storage.MongoStorage
 	queue        *queue.RedisQueue
 	workerPool   *worker.Pool
-	election     *election.BullyElection
+	election     election.Election
 	loadBalancer loadbalancer.LoadBalancer
 	httpServer   *http.Server
 	registry     job.ProcessorRegistry
@@ -69,12 +69,17 @@ func New(cfg *config.Config) (*Server, error) {
 		retryPolicy,
 	)
 
-	bullyElection := election.NewBullyElection(
+	electionFactory := election.NewElectionFactory()
+	electionAlgorithm, err := electionFactory.CreateElection(
+		cfg.Election.Algorithm,
 		cfg.Server.NodeID,
 		mongoStorage,
 		cfg.Election.Timeout,
 		cfg.Election.Interval,
 	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create election algorithm: %w", err)
+	}
 
 	factory := &loadbalancer.LoadBalancerFactory{}
 	lb := factory.Create(cfg.LoadBalancer.Strategy)
@@ -93,7 +98,7 @@ func New(cfg *config.Config) (*Server, error) {
 		storage:      mongoStorage,
 		queue:        redisQueue,
 		workerPool:   workerPool,
-		election:     bullyElection,
+		election:     electionAlgorithm,
 		loadBalancer: lb,
 		registry:     make(job.ProcessorRegistry),
 		authManager:  authManager,
@@ -103,9 +108,10 @@ func New(cfg *config.Config) (*Server, error) {
 
 func (s *Server) Start(ctx context.Context) error {
 	logger.WithFields(logrus.Fields{
-		"node_id":      s.config.Server.NodeID,
-		"worker_count": s.config.Server.WorkerCount,
-		"strategy":     s.loadBalancer.GetStrategy(),
+		"node_id":          s.config.Server.NodeID,
+		"worker_count":     s.config.Server.WorkerCount,
+		"load_strategy":    s.loadBalancer.GetStrategy(),
+		"election_algorithm": s.config.Election.Algorithm,
 	}).Info("Starting distributed job processor server")
 
 	if s.config.Metrics.Enabled {
@@ -183,6 +189,9 @@ func (s *Server) setupHTTPServer() {
 		api.GET("/workers", s.authManager.RequireRole(auth.RoleAdmin), s.getWorkers)
 		api.GET("/nodes", s.authManager.RequireRole(auth.RoleAdmin), s.getNodes)
 		api.GET("/leader", s.authManager.RequireRole(auth.RoleUser), s.getLeader)
+		api.GET("/election", s.authManager.RequireRole(auth.RoleUser), s.getElectionInfo)
+		api.GET("/election/algorithms/:algorithm", s.authManager.RequireRole(auth.RoleUser), s.getAlgorithmInfo)
+		api.GET("/cluster", s.authManager.RequireRole(auth.RoleAdmin), s.getClusterStatus)
 	}
 
 	router.GET("/health", s.healthCheck)

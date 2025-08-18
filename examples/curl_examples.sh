@@ -72,7 +72,16 @@ curl -X GET $BASE_URL/nodes
 echo -e "\n\n11. Get Leader Information"
 curl -X GET $BASE_URL/leader
 
-echo -e "\n\n12. Prometheus Metrics"
+echo -e "\n\n12. Get Election Information"
+curl -X GET $BASE_URL/election
+
+echo -e "\n\n13. Get Algorithm Information"
+curl -X GET $BASE_URL/election/algorithms/raft
+
+echo -e "\n\n14. Get Cluster Status"
+curl -X GET $BASE_URL/cluster
+
+echo -e "\n\n15. Prometheus Metrics"
 curl -X GET http://localhost:9090/metrics
 
 echo -e "\n\n=== Examples Complete ==="
