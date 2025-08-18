@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"distributed-job-processor/internal/auth"
 	"distributed-job-processor/internal/config"
 	"distributed-job-processor/internal/election"
 	"distributed-job-processor/internal/loadbalancer"
@@ -14,6 +15,7 @@ import (
 	"distributed-job-processor/internal/queue"
 	"distributed-job-processor/internal/retry"
 	"distributed-job-processor/internal/storage"
+	"distributed-job-processor/internal/tls"
 	"distributed-job-processor/internal/worker"
 	"distributed-job-processor/pkg/job"
 
@@ -31,6 +33,8 @@ type Server struct {
 	loadBalancer loadbalancer.LoadBalancer
 	httpServer   *http.Server
 	registry     job.ProcessorRegistry
+	authManager  *auth.AuthManager
+	tlsConfig    *tls.TLSConfig
 }
 
 func New(cfg *config.Config) (*Server, error) {
@@ -75,6 +79,15 @@ func New(cfg *config.Config) (*Server, error) {
 	factory := &loadbalancer.LoadBalancerFactory{}
 	lb := factory.Create(cfg.LoadBalancer.Strategy)
 
+	authConfig := &auth.AuthConfig{
+		Enabled:   cfg.Security.AuthEnabled,
+		JWTSecret: cfg.Security.JWTSecret,
+		TokenTTL:  24 * time.Hour,
+	}
+	authManager := auth.NewAuthManager(authConfig)
+
+	tlsConfig := tls.NewTLSConfig(&cfg.Security)
+
 	return &Server{
 		config:       cfg,
 		storage:      mongoStorage,
@@ -83,6 +96,8 @@ func New(cfg *config.Config) (*Server, error) {
 		election:     bullyElection,
 		loadBalancer: lb,
 		registry:     make(job.ProcessorRegistry),
+		authManager:  authManager,
+		tlsConfig:    tlsConfig,
 	}, nil
 }
 
@@ -113,6 +128,10 @@ func (s *Server) Start(ctx context.Context) error {
 	})
 
 	logger.WithField("port", s.config.Server.Port).Info("HTTP server starting")
+	
+	if s.config.Security.TLSEnabled {
+		return s.httpServer.ListenAndServeTLS(s.config.Security.CertFile, s.config.Security.KeyFile)
+	}
 	return s.httpServer.ListenAndServe()
 }
 
@@ -143,16 +162,23 @@ func (s *Server) setupHTTPServer() {
 	router := gin.New()
 	router.Use(gin.Recovery())
 
+	if s.config.Security.AuthEnabled {
+		router.POST("/auth/login", s.authManager.LoginHandler())
+	}
+
 	api := router.Group("/api/v1")
+	if s.config.Security.AuthEnabled {
+		api.Use(s.authManager.AuthMiddleware())
+	}
 	{
-		api.POST("/jobs", s.createJob)
-		api.GET("/jobs/:id", s.getJob)
-		api.GET("/jobs", s.listJobs)
-		api.DELETE("/jobs/:id", s.deleteJob)
-		api.GET("/stats", s.getStats)
-		api.GET("/workers", s.getWorkers)
-		api.GET("/nodes", s.getNodes)
-		api.GET("/leader", s.getLeader)
+		api.POST("/jobs", s.authManager.RequireRole(auth.RoleUser), s.createJob)
+		api.GET("/jobs/:id", s.authManager.RequireRole(auth.RoleUser), s.getJob)
+		api.GET("/jobs", s.authManager.RequireRole(auth.RoleUser), s.listJobs)
+		api.DELETE("/jobs/:id", s.authManager.RequireRole(auth.RoleAdmin), s.deleteJob)
+		api.GET("/stats", s.authManager.RequireRole(auth.RoleUser), s.getStats)
+		api.GET("/workers", s.authManager.RequireRole(auth.RoleAdmin), s.getWorkers)
+		api.GET("/nodes", s.authManager.RequireRole(auth.RoleAdmin), s.getNodes)
+		api.GET("/leader", s.authManager.RequireRole(auth.RoleUser), s.getLeader)
 	}
 
 	router.GET("/health", s.healthCheck)

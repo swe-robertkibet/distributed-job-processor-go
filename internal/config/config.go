@@ -66,6 +66,8 @@ type SecurityConfig struct {
 	TLSEnabled bool
 	CertFile   string
 	KeyFile    string
+	AuthEnabled bool
+	JWTSecret   string
 }
 
 func Load() (*Config, error) {
@@ -109,9 +111,11 @@ func Load() (*Config, error) {
 			Port:    getEnv("METRICS_PORT", "9090"),
 		},
 		Security: SecurityConfig{
-			TLSEnabled: getEnvBool("TLS_ENABLED", false),
-			CertFile:   getEnv("TLS_CERT_FILE", ""),
-			KeyFile:    getEnv("TLS_KEY_FILE", ""),
+			TLSEnabled:  getEnvBool("TLS_ENABLED", false),
+			CertFile:    getEnv("TLS_CERT_FILE", ""),
+			KeyFile:     getEnv("TLS_KEY_FILE", ""),
+			AuthEnabled: getEnvBool("AUTH_ENABLED", false),
+			JWTSecret:   getEnv("JWT_SECRET", "your-secret-key"),
 		},
 	}, nil
 }
