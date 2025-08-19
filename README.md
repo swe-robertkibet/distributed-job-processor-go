@@ -603,4 +603,4 @@ The system exposes comprehensive metrics via Prometheus:
 
 **This distributed job processor demonstrates enterprise-grade distributed systems engineering.** It handles the complex challenges of distributed coordination, fault tolerance, and scalability that you'd encounter in production environments. Whether you're processing background jobs, implementing workflow orchestration, or building distributed systems, this codebase provides a solid foundation with battle-tested patterns.
 
-For questions, issues, or contributions, please check the issue tracker or reach out to the maintainers.
+For questions, issues, or contributions, please check the issue tracker or reach out to swe.robertkibet@gmail.com.
