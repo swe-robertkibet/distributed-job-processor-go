@@ -11,9 +11,11 @@ import (
 	"time"
 
 	"distributed-job-processor/internal/config"
+	"distributed-job-processor/internal/loadbalancer"
 	"distributed-job-processor/internal/server"
 	"distributed-job-processor/pkg/job"
 
+	"github.com/joho/godotenv"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -34,48 +36,27 @@ func (t *TestProcessor) Type() string {
 }
 
 func setupTestServer(t *testing.T) (*server.Server, func()) {
-	cfg := &config.Config{
-		Server: config.ServerConfig{
-			Port:        "0",
-			Host:        "127.0.0.1",
-			WorkerCount: 2,
-			NodeID:      "test-node",
-		},
-		MongoDB: config.MongoDBConfig{
-			URI:      "mongodb://localhost:27017",
-			Database: "jobprocessor_test",
-			Timeout:  10 * time.Second,
-		},
-		Redis: config.RedisConfig{
-			Addr:     "localhost:6379",
-			Password: "",
-			DB:       1,
-		},
-		Election: config.ElectionConfig{
-			Algorithm: "bully",
-			Timeout:   5 * time.Second,
-			Interval:  10 * time.Second,
-		},
-		LoadBalancer: config.LoadBalancerConfig{
-			Strategy: "round_robin",
-		},
-		Retry: config.RetryConfig{
-			Policy:       "exponential",
-			MaxRetries:   3,
-			BaseDelay:    100 * time.Millisecond,
-			MaxDelay:     1 * time.Second,
-			Multiplier:   2.0,
-			JitterFactor: 0.1,
-		},
-		Metrics: config.MetricsConfig{
-			Enabled: false,
-			Port:    "0",
-		},
-		Security: config.SecurityConfig{
-			TLSEnabled:  false,
-			AuthEnabled: false,
-		},
+	// Load .env file from parent directory (tests run from ./tests directory)
+	err := godotenv.Load("../.env")
+	if err != nil {
+		t.Logf("Warning: Could not load .env file: %v", err)
 	}
+	
+	// Load configuration from environment (including .env file)
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Failed to load configuration: %v", err)
+	}
+
+	// Override specific settings for testing
+	cfg.Server.Port = "0"          // Use random available port
+	cfg.Server.Host = "127.0.0.1"  // Bind to localhost for testing
+	cfg.Server.WorkerCount = 2     // Reduce workers for testing
+	cfg.Server.NodeID = "test-node"
+	cfg.MongoDB.Database = "jobprocessor_test"  // Use separate test database
+	cfg.Metrics.Enabled = false    // Disable metrics for testing
+	cfg.Security.TLSEnabled = false
+	cfg.Security.AuthEnabled = false
 
 	srv, err := server.New(cfg)
 	require.NoError(t, err)
@@ -104,8 +85,6 @@ func TestJobCreationAndProcessing(t *testing.T) {
 	}
 
 	srv.RegisterProcessor(&TestProcessor{})
-	srv.setupHTTPServer()
-	router := srv.Router()
 
 	ctx := context.Background()
 	go srv.Start(ctx)
@@ -119,7 +98,7 @@ func TestJobCreationAndProcessing(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 
-	router.ServeHTTP(w, req)
+	srv.Router().ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusCreated, w.Code)
 
@@ -136,7 +115,7 @@ func TestJobCreationAndProcessing(t *testing.T) {
 	getReq := httptest.NewRequest("GET", fmt.Sprintf("/api/v1/jobs/%s", createdJob.ID.Hex()), nil)
 	getW := httptest.NewRecorder()
 
-	router.ServeHTTP(getW, getReq)
+	srv.Router().ServeHTTP(getW, getReq)
 
 	assert.Equal(t, http.StatusOK, getW.Code)
 
@@ -152,13 +131,14 @@ func TestHealthCheck(t *testing.T) {
 	srv, cleanup := setupTestServer(t)
 	defer cleanup()
 
-	srv.setupHTTPServer()
-	router := srv.Router()
+	ctx := context.Background()
+	go srv.Start(ctx)
+	time.Sleep(1 * time.Second)
 
 	req := httptest.NewRequest("GET", "/health", nil)
 	w := httptest.NewRecorder()
 
-	router.ServeHTTP(w, req)
+	srv.Router().ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusOK, w.Code)
 
@@ -196,7 +176,7 @@ func TestJobListing(t *testing.T) {
 		req.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()
 
-		srv.ServeHTTP(w, req)
+		srv.Router().ServeHTTP(w, req)
 		assert.Equal(t, http.StatusCreated, w.Code)
 	}
 
@@ -205,7 +185,7 @@ func TestJobListing(t *testing.T) {
 	listReq := httptest.NewRequest("GET", "/api/v1/jobs", nil)
 	listW := httptest.NewRecorder()
 
-	srv.ServeHTTP(listW, listReq)
+	srv.Router().ServeHTTP(listW, listReq)
 
 	assert.Equal(t, http.StatusOK, listW.Code)
 
@@ -223,7 +203,7 @@ func TestSystemStats(t *testing.T) {
 	req := httptest.NewRequest("GET", "/api/v1/stats", nil)
 	w := httptest.NewRecorder()
 
-	srv.ServeHTTP(w, req)
+	srv.Router().ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusOK, w.Code)
 
@@ -342,6 +322,6 @@ func BenchmarkJobCreation(b *testing.B) {
 		req.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()
 
-		srv.ServeHTTP(w, req)
+		srv.Router().ServeHTTP(w, req)
 	}
 }

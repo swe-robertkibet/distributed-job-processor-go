@@ -1,7 +1,6 @@
 package tests
 
 import (
-	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -10,20 +9,31 @@ import (
 	"distributed-job-processor/internal/election"
 	"distributed-job-processor/internal/storage"
 
+	"github.com/joho/godotenv"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func setupTestStorage(t *testing.T) (*storage.MongoStorage, func()) {
-	cfg := &config.MongoDBConfig{
-		URI:      "mongodb://localhost:27017",
-		Database: "election_test",
-		Timeout:  5 * time.Second,
+	// Load .env file from parent directory (tests run from ./tests directory)
+	err := godotenv.Load("../.env")
+	if err != nil {
+		t.Logf("Warning: Could not load .env file: %v", err)
+	}
+	
+	// Load configuration from environment (including .env file)
+	fullCfg, err := config.Load()
+	if err != nil {
+		t.Skipf("Failed to load configuration: %v", err)
+		return nil, nil
 	}
 
-	mongoStorage, err := storage.NewMongoStorage(cfg.URI, cfg.Database, cfg.Timeout)
+	// Use test database name
+	testDatabase := "election_test"
+	
+	mongoStorage, err := storage.NewMongoStorage(fullCfg.MongoDB.URI, testDatabase, fullCfg.MongoDB.Timeout)
 	if err != nil {
-		t.Skip("MongoDB not available for testing")
+		t.Skipf("MongoDB Atlas not available for testing: %v", err)
 		return nil, nil
 	}
 
