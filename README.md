@@ -1,6 +1,6 @@
 # Distributed Job Processor
 
-A high-performance, fault-tolerant distributed job processing system built in Go. This isn't your typical job queue—it's a sophisticated distributed system that implements multiple consensus algorithms, advanced load balancing strategies, and enterprise-grade monitoring capabilities.
+A high-performance, fault-tolerant distributed job processing system built in Go. This is a sophisticated distributed system that implements multiple consensus algorithms, advanced load balancing strategies, and enterprise-grade monitoring capabilities.
 
 ## What Makes This Special?
 
@@ -55,7 +55,7 @@ This system was built to solve real distributed computing challenges. While most
 - **Priority-Based Scheduling**: High, Normal, Low priority job execution
 - **Smart Retry Logic**: Exponential backoff with jitter to prevent thundering herd
 - **Delayed Job Execution**: Schedule jobs for future execution
-- **Job State Tracking**: Complete lifecycle management (pending → running → completed/failed)
+- **Job State Tracking**: Complete lifecycle management (pending to running to completed/failed)
 
 ### Load Balancing Strategies
 - **Round Robin**: Fair distribution across workers
@@ -83,7 +83,7 @@ This system was built to solve real distributed computing challenges. While most
 ## 🏁 Quick Start
 
 ### Prerequisites
-- Docker & Docker Compose
+- Docker and Docker Compose
 - MongoDB (or use Docker Compose)
 - Redis (or use Docker Compose)
 
@@ -427,7 +427,7 @@ Content-Type: application/json
 
 **Default Users:**
 - `admin` / `admin123` (Admin role)
-- `user` / `user123` (User role)  
+- `user` / `user123` (User role)
 - `worker` / `worker123` (Worker role)
 
 ## 🐳 Deployment
@@ -553,8 +553,8 @@ server.RegisterProcessor(&EmailProcessor{})
 
 ### Performance Considerations
 - The system is optimized for throughput over latency
-- Raft algorithm provides strongest consistency but highest overhead
-- Gossip protocol scales best but has eventual consistency
+- Raft algorithm provides strongest consistency with highest overhead
+- Gossip protocol scales best with eventual consistency
 - Redis pipelining is used for queue operations
 - MongoDB operations are optimized with proper indexing
 
@@ -572,12 +572,12 @@ The system exposes comprehensive metrics via Prometheus:
 
 ### Common Issues
 
-**Leader Election Not Working**
+**Leader Election Issues**
 - Check MongoDB connectivity between nodes
 - Verify `NODE_ID` is unique per node
 - Ensure election timeouts are appropriate for network latency
 
-**Jobs Not Processing**
+**Job Processing Issues**
 - Verify Redis connectivity
 - Check if job processors are registered
 - Monitor worker pool status via `/api/v1/workers`
