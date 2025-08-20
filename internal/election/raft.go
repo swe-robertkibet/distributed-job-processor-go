@@ -101,6 +101,12 @@ type RaftElection struct {
 	
 	electionTimer *time.Timer
 	heartbeatTimer *time.Timer
+	
+	// Leadership grace period tracking
+	leadershipStartTime time.Time
+	
+	// Heartbeat reception tracking
+	lastHeartbeatReceived time.Time
 }
 
 func NewRaftElection(nodeID string, storage *storage.MongoStorage, electionTimeout, heartbeatTimeout time.Duration) *RaftElection {
@@ -123,6 +129,7 @@ func NewRaftElection(nodeID string, storage *storage.MongoStorage, electionTimeo
 		votes:            make(map[string]bool),
 		ctx:              ctx,
 		cancel:           cancel,
+		lastHeartbeatReceived: time.Now(), // Initialize to current time
 	}
 }
 
@@ -216,12 +223,52 @@ func (r *RaftElection) run() {
 }
 
 func (r *RaftElection) runFollower() {
-	select {
-	case <-r.ctx.Done():
-		return
-	case <-r.electionTimer.C:
-		logger.WithField("node_id", r.nodeID).Info("Election timeout, becoming candidate")
-		r.becomeCandidate()
+	// Heartbeat detection ticker - check for leader heartbeats frequently
+	heartbeatCheckTicker := time.NewTicker(r.heartbeatTimeout / 4) // Check 4x per heartbeat period
+	defer heartbeatCheckTicker.Stop()
+	
+	for {
+		select {
+		case <-r.ctx.Done():
+			return
+		case <-heartbeatCheckTicker.C:
+			// Check for active leader heartbeats
+			if r.receiveHeartbeat() {
+				// Reset election timer if we received a valid heartbeat
+				r.mu.Lock()
+				r.lastHeartbeatReceived = time.Now()
+				r.resetElectionTimer()
+				logger.WithFields(logrus.Fields{
+					"node_id": r.nodeID,
+					"current_term": r.currentTerm,
+				}).Debug("Received leader heartbeat, resetting election timer")
+				r.mu.Unlock()
+			}
+		case <-r.electionTimer.C:
+			// Check one more time for recent heartbeats before starting election
+			r.mu.RLock()
+			timeSinceLastHeartbeat := time.Since(r.lastHeartbeatReceived)
+			r.mu.RUnlock()
+			
+			if timeSinceLastHeartbeat < r.electionTimeout {
+				// Recently received heartbeat, reset timer and continue as follower
+				r.mu.Lock()
+				r.resetElectionTimer()
+				r.mu.Unlock()
+				logger.WithFields(logrus.Fields{
+					"node_id": r.nodeID,
+					"time_since_heartbeat": timeSinceLastHeartbeat,
+				}).Debug("Recent heartbeat detected, postponing election")
+				continue
+			}
+			
+			logger.WithFields(logrus.Fields{
+				"node_id": r.nodeID,
+				"time_since_heartbeat": timeSinceLastHeartbeat,
+			}).Info("Election timeout, becoming candidate")
+			r.becomeCandidate()
+			return
+		}
 	}
 }
 
@@ -293,35 +340,71 @@ func (r *RaftElection) runCandidate() {
 func (r *RaftElection) runLeader() {
 	logger.WithField("node_id", r.nodeID).Info("Running as leader")
 	
+	// Send initial heartbeat immediately
+	go r.sendHeartbeats()
+	
 	r.mu.Lock()
 	if r.heartbeatTimer != nil {
 		r.heartbeatTimer.Stop()
 	}
-	r.heartbeatTimer = time.NewTimer(r.heartbeatTimeout)
+	// Send heartbeats more frequently (half the heartbeat timeout)
+	heartbeatInterval := r.heartbeatTimeout / 2
+	r.heartbeatTimer = time.NewTimer(heartbeatInterval)
 	r.mu.Unlock()
 	
-	// Fast conflict detection ticker (every 100ms)
-	conflictTicker := time.NewTicker(100 * time.Millisecond)
+	// Adaptive conflict detection with exponential backoff
+	conflictCheckInterval := 100 * time.Millisecond
+	conflictTicker := time.NewTicker(conflictCheckInterval)
 	defer conflictTicker.Stop()
+	
+	validationFailures := 0
 	
 	for {
 		select {
 		case <-r.ctx.Done():
 			return
 		case <-conflictTicker.C:
-			// Fast leadership validation - check for conflicts every 100ms
+			// Leadership validation with exponential backoff for transient failures
 			if !r.validateLeadershipContinuity() {
-				logger.WithField("node_id", r.nodeID).Warning("Leadership validation failed - stepping down immediately")
-				r.mu.Lock()
-				r.state = Follower
-				r.updateNodeInfo(false)
-				r.mu.Unlock()
-				return
+				validationFailures++
+				
+				// Exponential backoff: increase interval on repeated failures
+				if validationFailures > 1 {
+					newInterval := time.Duration(validationFailures*validationFailures) * 100 * time.Millisecond
+					if newInterval > 2*time.Second {
+						newInterval = 2 * time.Second // Cap at 2 seconds
+					}
+					conflictTicker.Reset(newInterval)
+					
+					logger.WithFields(logrus.Fields{
+						"node_id": r.nodeID,
+						"failures": validationFailures,
+						"backoff_interval": newInterval,
+					}).Warning("Leadership validation failed - applying exponential backoff")
+					
+					// Only step down after multiple consecutive failures
+					if validationFailures >= 3 {
+						logger.WithField("node_id", r.nodeID).Warning("Leadership validation failed multiple times - stepping down")
+						r.mu.Lock()
+						r.state = Follower
+						r.updateNodeInfo(false)
+						r.mu.Unlock()
+						return
+					}
+				} else {
+					logger.WithField("node_id", r.nodeID).Warning("Leadership validation failed - first failure, continuing with monitoring")
+				}
+			} else {
+				// Reset on successful validation
+				if validationFailures > 0 {
+					validationFailures = 0
+					conflictTicker.Reset(100 * time.Millisecond) // Reset to fast checking
+				}
 			}
 		case <-r.heartbeatTimer.C:
 			go r.sendHeartbeats()
 			r.mu.Lock()
-			r.heartbeatTimer.Reset(r.heartbeatTimeout)
+			r.heartbeatTimer.Reset(heartbeatInterval) // Use the faster interval
 			r.mu.Unlock()
 		}
 	}
@@ -339,6 +422,7 @@ func (r *RaftElection) becomeFollower(term int64) {
 	oldState := r.state
 	r.state = Follower
 	r.lastHeartbeat = time.Now()
+	r.lastHeartbeatReceived = time.Now() // Reset heartbeat reception tracking
 	r.resetElectionTimer()
 	
 	if oldState != Follower {
@@ -424,6 +508,11 @@ func (r *RaftElection) becomeLeader() {
 		// Update node info outside the lock to prevent deadlock
 		r.mu.Unlock()
 		r.updateNodeInfo(true)
+		
+		// Set leadership start time AFTER node info update completes to ensure proper sequencing
+		r.mu.Lock()
+		r.leadershipStartTime = time.Now()
+		r.mu.Unlock()
 		r.mu.Lock()
 	}
 }
@@ -521,7 +610,7 @@ func (r *RaftElection) sendHeartbeats() {
 	currentTerm := r.currentTerm
 	r.mu.RUnlock()
 	
-	// Update our heartbeat timestamp immediately
+	// Update our heartbeat timestamp immediately with current term
 	r.updateNodeInfo(true)
 	
 	nodes, err := r.storage.GetNodes(r.ctx)
@@ -561,6 +650,20 @@ func (r *RaftElection) sendHeartbeats() {
 			return
 		}
 	}
+	
+	// Send heartbeat notifications to all followers
+	followerCount := 0
+	for _, node := range nodes {
+		if node.ID != r.nodeID {
+			followerCount++
+		}
+	}
+	
+	logger.WithFields(logrus.Fields{
+		"node_id": r.nodeID,
+		"term": currentTerm,
+		"followers": followerCount,
+	}).Debug("Sending heartbeats to followers")
 	
 	r.mu.RLock()
 	request := AppendEntriesRequest{
@@ -623,6 +726,48 @@ func (r *RaftElection) hasLeaderInCurrentTerm() bool {
 			// Check if this leader is in a valid state
 			if time.Since(node.LastSeen) < r.heartbeatTimeout*3 {
 				return true
+			}
+		}
+	}
+	return false
+}
+
+func (r *RaftElection) receiveHeartbeat() bool {
+	// Simulate receiving heartbeats by checking for active leader in storage
+	nodes, err := r.storage.GetNodes(r.ctx)
+	if err != nil {
+		return false
+	}
+	
+	r.mu.RLock()
+	currentTerm := r.currentTerm
+	r.mu.RUnlock()
+	
+	for _, node := range nodes {
+		if node.ID != r.nodeID && node.IsLeader {
+			// Check if this leader is recently active (within heartbeat timeout)
+			timeSinceLastSeen := time.Since(node.LastSeen)
+			if timeSinceLastSeen < r.heartbeatTimeout {
+				// If leader has higher or equal term, we should acknowledge heartbeat
+				if node.Term >= currentTerm {
+					logger.WithFields(logrus.Fields{
+						"node_id": r.nodeID,
+						"leader_id": node.ID,
+						"leader_term": node.Term,
+						"our_term": currentTerm,
+						"time_since_seen": timeSinceLastSeen,
+					}).Debug("Received heartbeat from active leader")
+					
+					// Update our term if leader has higher term
+					if node.Term > currentTerm {
+						r.mu.Lock()
+						r.currentTerm = node.Term
+						r.votedFor = ""
+						r.mu.Unlock()
+					}
+					
+					return true
+				}
 			}
 		}
 	}
@@ -706,7 +851,18 @@ func (r *RaftElection) validateLeadershipContinuity() bool {
 		return false
 	}
 	currentTerm := r.currentTerm
+	leadershipStart := r.leadershipStartTime
 	r.mu.RUnlock()
+	
+	// Grace period for newly elected leaders - skip validation for first 2 seconds
+	if time.Since(leadershipStart) < 2*time.Second {
+		logger.WithFields(logrus.Fields{
+			"node_id": r.nodeID,
+			"term": currentTerm,
+			"time_since_election": time.Since(leadershipStart),
+		}).Debug("Skipping leadership validation during grace period")
+		return true
+	}
 	
 	nodes, err := r.storage.GetNodes(r.ctx)
 	if err != nil {
@@ -727,8 +883,8 @@ func (r *RaftElection) validateLeadershipContinuity() bool {
 			return false
 		}
 		
-		// Count active leaders in current term
-		if node.IsLeader && node.Term == currentTerm && time.Since(node.LastSeen) < time.Second {
+		// Count active leaders in current term - increased window from 1s to 3s for better MongoDB consistency
+		if node.IsLeader && node.Term == currentTerm && time.Since(node.LastSeen) < 3*time.Second {
 			activeLeaders++
 			if node.ID != r.nodeID {
 				logger.WithFields(logrus.Fields{
@@ -741,7 +897,7 @@ func (r *RaftElection) validateLeadershipContinuity() bool {
 		}
 	}
 	
-	// If we're not registered as leader, step down
+	// If we're not registered as leader, step down - but be more lenient for transient issues
 	if activeLeaders == 0 {
 		logger.WithField("node_id", r.nodeID).Warning("Not registered as active leader - stepping down")
 		return false

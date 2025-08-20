@@ -399,27 +399,37 @@ func (m *MongoStorage) AtomicClaimLeadership(ctx context.Context, nodeID string,
 		return false, fmt.Errorf("failed to register as leader: %w", err)
 	}
 	
-	// Step 4: Verify we're the only leader (final safety check)
-	time.Sleep(50 * time.Millisecond) // Small delay to ensure consistency
+	// Step 4: Verify we're the only leader (final safety check) with improved consistency
+	time.Sleep(100 * time.Millisecond) // Increased delay to ensure better MongoDB consistency
 	
-	leaderCount, err := m.nodes.CountDocuments(ctx, bson.M{
-		"is_leader": true,
-		"last_seen": bson.M{"$gte": now.Add(-1 * time.Second)},
-	})
-	if err != nil {
-		return false, fmt.Errorf("failed to verify leadership: %w", err)
-	}
-	
-	if leaderCount > 1 {
-		// Conflict detected - step down
-		_, stepDownErr := m.nodes.UpdateOne(ctx, 
-			bson.M{"_id": nodeID}, 
-			bson.M{"$set": bson.M{"is_leader": false}},
-		)
-		if stepDownErr != nil {
-			return false, fmt.Errorf("leadership conflict and failed to step down: %w", stepDownErr)
+	// Retry verification up to 3 times in case of transient issues
+	for retry := 0; retry < 3; retry++ {
+		leaderCount, err := m.nodes.CountDocuments(ctx, bson.M{
+			"is_leader": true,
+			"last_seen": bson.M{"$gte": now.Add(-2 * time.Second)}, // Extended window for verification
+		})
+		if err != nil {
+			if retry == 2 {
+				return false, fmt.Errorf("failed to verify leadership after retries: %w", err)
+			}
+			time.Sleep(50 * time.Millisecond) // Wait before retry
+			continue
 		}
-		return false, nil
+		
+		if leaderCount > 1 {
+			// Conflict detected - step down
+			_, stepDownErr := m.nodes.UpdateOne(ctx, 
+				bson.M{"_id": nodeID}, 
+				bson.M{"$set": bson.M{"is_leader": false}},
+			)
+			if stepDownErr != nil {
+				return false, fmt.Errorf("leadership conflict and failed to step down: %w", stepDownErr)
+			}
+			return false, nil
+		}
+		
+		// Verification passed
+		break
 	}
 	
 	return result.ModifiedCount > 0 || result.UpsertedCount > 0, nil
