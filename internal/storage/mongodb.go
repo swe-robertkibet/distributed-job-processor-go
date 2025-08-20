@@ -283,6 +283,7 @@ type NodeInfo struct {
 	LastSeen   time.Time `bson:"last_seen" json:"last_seen"`
 	WorkerCount int      `bson:"worker_count" json:"worker_count"`
 	Version    string    `bson:"version" json:"version"`
+	Term       int64     `bson:"term,omitempty" json:"term,omitempty"`
 }
 
 func (m *MongoStorage) RegisterNode(ctx context.Context, node *NodeInfo) error {
@@ -334,4 +335,92 @@ func (m *MongoStorage) ClearAllNodes(ctx context.Context) error {
 		return fmt.Errorf("failed to clear all nodes: %w", err)
 	}
 	return nil
+}
+
+func (m *MongoStorage) AtomicClaimLeadership(ctx context.Context, nodeID string, term int64) (bool, error) {
+	// Step 1: Clear any stale leaders (older than 10 seconds)
+	staleTime := time.Now().Add(-10 * time.Second)
+	_, err := m.nodes.UpdateMany(ctx, 
+		bson.M{
+			"is_leader": true,
+			"last_seen": bson.M{"$lt": staleTime},
+		},
+		bson.M{
+			"$set": bson.M{
+				"is_leader": false,
+			},
+		},
+	)
+	if err != nil {
+		return false, fmt.Errorf("failed to clear stale leaders: %w", err)
+	}
+	
+	// Step 2: Try to atomically claim leadership if no current leader exists
+	now := time.Now()
+	
+	// First, check if there are any active leaders
+	activeLeaderCount, err := m.nodes.CountDocuments(ctx, bson.M{
+		"is_leader": true,
+		"last_seen": bson.M{"$gte": now.Add(-3 * time.Second)},
+		"_id": bson.M{"$ne": nodeID}, // Exclude ourselves
+	})
+	if err != nil {
+		return false, fmt.Errorf("failed to count active leaders: %w", err)
+	}
+	
+	if activeLeaderCount > 0 {
+		return false, nil // Another leader already exists
+	}
+	
+	// Step 3: Atomically register as leader
+	nodeInfo := &NodeInfo{
+		ID:          nodeID,
+		Address:     "localhost:8080",
+		IsLeader:    true,
+		LastSeen:    now,
+		WorkerCount: 10,
+		Version:     "1.0.0",
+	}
+	
+	update := bson.M{
+		"$set": bson.M{
+			"address":      nodeInfo.Address,
+			"is_leader":    true,
+			"last_seen":    now,
+			"worker_count": nodeInfo.WorkerCount,
+			"version":      nodeInfo.Version,
+			"term":         term, // Add term tracking
+		},
+	}
+	
+	opts := options.Update().SetUpsert(true)
+	result, err := m.nodes.UpdateOne(ctx, bson.M{"_id": nodeID}, update, opts)
+	if err != nil {
+		return false, fmt.Errorf("failed to register as leader: %w", err)
+	}
+	
+	// Step 4: Verify we're the only leader (final safety check)
+	time.Sleep(50 * time.Millisecond) // Small delay to ensure consistency
+	
+	leaderCount, err := m.nodes.CountDocuments(ctx, bson.M{
+		"is_leader": true,
+		"last_seen": bson.M{"$gte": now.Add(-1 * time.Second)},
+	})
+	if err != nil {
+		return false, fmt.Errorf("failed to verify leadership: %w", err)
+	}
+	
+	if leaderCount > 1 {
+		// Conflict detected - step down
+		_, stepDownErr := m.nodes.UpdateOne(ctx, 
+			bson.M{"_id": nodeID}, 
+			bson.M{"$set": bson.M{"is_leader": false}},
+		)
+		if stepDownErr != nil {
+			return false, fmt.Errorf("leadership conflict and failed to step down: %w", stepDownErr)
+		}
+		return false, nil
+	}
+	
+	return result.ModifiedCount > 0 || result.UpsertedCount > 0, nil
 }

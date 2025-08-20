@@ -300,14 +300,30 @@ func (r *RaftElection) runLeader() {
 	r.heartbeatTimer = time.NewTimer(r.heartbeatTimeout)
 	r.mu.Unlock()
 	
-	select {
-	case <-r.ctx.Done():
-		return
-	case <-r.heartbeatTimer.C:
-		go r.sendHeartbeats()
-		r.mu.Lock()
-		r.heartbeatTimer.Reset(r.heartbeatTimeout)
-		r.mu.Unlock()
+	// Fast conflict detection ticker (every 100ms)
+	conflictTicker := time.NewTicker(100 * time.Millisecond)
+	defer conflictTicker.Stop()
+	
+	for {
+		select {
+		case <-r.ctx.Done():
+			return
+		case <-conflictTicker.C:
+			// Fast leadership validation - check for conflicts every 100ms
+			if !r.validateLeadershipContinuity() {
+				logger.WithField("node_id", r.nodeID).Warning("Leadership validation failed - stepping down immediately")
+				r.mu.Lock()
+				r.state = Follower
+				r.updateNodeInfo(false)
+				r.mu.Unlock()
+				return
+			}
+		case <-r.heartbeatTimer.C:
+			go r.sendHeartbeats()
+			r.mu.Lock()
+			r.heartbeatTimer.Reset(r.heartbeatTimeout)
+			r.mu.Unlock()
+		}
 	}
 }
 
@@ -365,6 +381,16 @@ func (r *RaftElection) becomeLeader() {
 		return
 	}
 	
+	// Critical: Validate term consistency before any leadership claims
+	if !r.validateTermConsistency() {
+		logger.WithFields(logrus.Fields{
+			"node_id": r.nodeID,
+			"term": r.currentTerm,
+		}).Warning("Cannot become leader - term consistency validation failed")
+		r.becomeFollowerUnsafe(r.currentTerm + 1) // Advance term and become follower
+		return
+	}
+	
 	// Double-check we still have majority with current votes
 	voteCount := len(r.votes)
 	if !r.hasMajorityUnsafe(voteCount) {
@@ -378,7 +404,7 @@ func (r *RaftElection) becomeLeader() {
 	
 	// Check if another leader already exists in this term by trying to register as leader atomically
 	if !r.tryClaimLeadership() {
-		logger.WithField("node_id", r.nodeID).Info("Cannot become leader - another leader exists in current term")
+		logger.WithField("node_id", r.nodeID).Info("Cannot become leader - atomic leadership claim failed")
 		r.becomeFollowerUnsafe(r.currentTerm)
 		return
 	}
@@ -393,8 +419,12 @@ func (r *RaftElection) becomeLeader() {
 		}).Info("Became leader")
 		
 		r.initializeLeaderState()
-		r.updateNodeInfo(true)
 		r.notifyCallbacks()
+		
+		// Update node info outside the lock to prevent deadlock
+		r.mu.Unlock()
+		r.updateNodeInfo(true)
+		r.mu.Lock()
 	}
 }
 
@@ -482,10 +512,54 @@ func (r *RaftElection) handleVoteResponse(nodeID string, response VoteResponse) 
 }
 
 func (r *RaftElection) sendHeartbeats() {
+	// First validate we're still a valid leader
+	r.mu.RLock()
+	if r.state != Leader {
+		r.mu.RUnlock()
+		return
+	}
+	currentTerm := r.currentTerm
+	r.mu.RUnlock()
+	
+	// Update our heartbeat timestamp immediately
+	r.updateNodeInfo(true)
+	
 	nodes, err := r.storage.GetNodes(r.ctx)
 	if err != nil {
 		logger.WithError(err).Error("Failed to get nodes for heartbeat")
 		return
+	}
+	
+	// Check for higher terms or conflicting leaders before sending heartbeats
+	for _, node := range nodes {
+		if node.Term > currentTerm {
+			logger.WithFields(logrus.Fields{
+				"node_id": r.nodeID,
+				"our_term": currentTerm,
+				"other_term": node.Term,
+				"other_node": node.ID,
+			}).Warning("Found higher term during heartbeat - stepping down")
+			
+			r.mu.Lock()
+			r.currentTerm = node.Term
+			r.state = Follower
+			r.votedFor = ""
+			r.mu.Unlock()
+			return
+		}
+		
+		if node.IsLeader && node.Term == currentTerm && node.ID != r.nodeID {
+			logger.WithFields(logrus.Fields{
+				"node_id": r.nodeID,
+				"conflicting_leader": node.ID,
+				"term": currentTerm,
+			}).Warning("Found conflicting leader during heartbeat - stepping down")
+			
+			r.mu.Lock()
+			r.state = Follower
+			r.mu.Unlock()
+			return
+		}
 	}
 	
 	r.mu.RLock()
@@ -504,8 +578,6 @@ func (r *RaftElection) sendHeartbeats() {
 			go r.sendAppendEntries(node.ID, request)
 		}
 	}
-	
-	r.updateNodeInfo(true)
 }
 
 func (r *RaftElection) sendAppendEntries(nodeID string, request AppendEntriesRequest) {
@@ -558,51 +630,124 @@ func (r *RaftElection) hasLeaderInCurrentTerm() bool {
 }
 
 func (r *RaftElection) tryClaimLeadership() bool {
-	// First clear any stale leaders
-	r.clearStaleLeaders()
-	
-	// Try to register as leader - this should be atomic
-	nodeInfo := &storage.NodeInfo{
-		ID:          r.nodeID,
-		Address:     "localhost:8080",
-		IsLeader:    true,
-		WorkerCount: 10,
-		Version:     "1.0.0",
-	}
-	
-	// Check if we can successfully register as leader
-	if err := r.storage.RegisterNode(r.ctx, nodeInfo); err != nil {
-		logger.WithError(err).Error("Failed to register as leader")
+	// Use atomic leadership claim from storage layer
+	claimed, err := r.storage.AtomicClaimLeadership(r.ctx, r.nodeID, r.currentTerm)
+	if err != nil {
+		logger.WithFields(logrus.Fields{
+			"node_id": r.nodeID,
+			"term": r.currentTerm,
+			"error": err,
+		}).Error("Failed to atomically claim leadership")
 		return false
 	}
 	
-	// Double-check that we're the only leader
-	time.Sleep(10 * time.Millisecond) // Small delay to ensure other nodes have updated
+	if !claimed {
+		logger.WithFields(logrus.Fields{
+			"node_id": r.nodeID,
+			"term": r.currentTerm,
+		}).Info("Leadership claim failed - another leader exists or conflict detected")
+		return false
+	}
+	
+	logger.WithFields(logrus.Fields{
+		"node_id": r.nodeID,
+		"term": r.currentTerm,
+	}).Info("Successfully claimed leadership atomically")
+	
+	return true
+}
+
+func (r *RaftElection) validateTermConsistency() bool {
+	// Check if any node has a higher term than ours
 	nodes, err := r.storage.GetNodes(r.ctx)
 	if err != nil {
+		logger.WithError(err).Error("Failed to get nodes for term validation")
 		return false
 	}
 	
-	leaderCount := 0
 	for _, node := range nodes {
-		if node.IsLeader && time.Since(node.LastSeen) < r.heartbeatTimeout {
-			leaderCount++
-			if node.ID != r.nodeID {
-				// Another node is also leader - conflict detected
+		if node.Term > r.currentTerm {
+			logger.WithFields(logrus.Fields{
+				"node_id": r.nodeID,
+				"our_term": r.currentTerm,
+				"other_node": node.ID,
+				"other_term": node.Term,
+			}).Warning("Found node with higher term - stepping down")
+			
+			// Update our term and become follower
+			r.currentTerm = node.Term
+			r.votedFor = ""
+			return false
+		}
+		
+		// If there's already a leader in our term, we shouldn't become leader
+		if node.IsLeader && node.Term == r.currentTerm && node.ID != r.nodeID {
+			// Check if this leader is still active
+			if time.Since(node.LastSeen) < r.heartbeatTimeout*2 {
 				logger.WithFields(logrus.Fields{
 					"node_id": r.nodeID,
-					"other_leader": node.ID,
-				}).Warning("Leadership conflict detected - stepping down")
-				
-				// Step down immediately
-				nodeInfo.IsLeader = false
-				r.storage.RegisterNode(r.ctx, nodeInfo)
+					"term": r.currentTerm,
+					"existing_leader": node.ID,
+					"leader_last_seen": node.LastSeen,
+				}).Info("Active leader already exists in current term")
 				return false
 			}
 		}
 	}
 	
-	return leaderCount == 1
+	return true
+}
+
+func (r *RaftElection) validateLeadershipContinuity() bool {
+	// Fast leadership validation for active leaders
+	r.mu.RLock()
+	if r.state != Leader {
+		r.mu.RUnlock()
+		return false
+	}
+	currentTerm := r.currentTerm
+	r.mu.RUnlock()
+	
+	nodes, err := r.storage.GetNodes(r.ctx)
+	if err != nil {
+		logger.WithError(err).Debug("Failed to get nodes for leadership validation")
+		return true // Don't step down on transient errors
+	}
+	
+	activeLeaders := 0
+	for _, node := range nodes {
+		// Check for higher terms
+		if node.Term > currentTerm {
+			logger.WithFields(logrus.Fields{
+				"node_id": r.nodeID,
+				"our_term": currentTerm,
+				"other_node": node.ID,
+				"other_term": node.Term,
+			}).Warning("Detected higher term - leadership invalidated")
+			return false
+		}
+		
+		// Count active leaders in current term
+		if node.IsLeader && node.Term == currentTerm && time.Since(node.LastSeen) < time.Second {
+			activeLeaders++
+			if node.ID != r.nodeID {
+				logger.WithFields(logrus.Fields{
+					"node_id": r.nodeID,
+					"term": currentTerm,
+					"conflicting_leader": node.ID,
+				}).Warning("Detected conflicting leader - stepping down")
+				return false
+			}
+		}
+	}
+	
+	// If we're not registered as leader, step down
+	if activeLeaders == 0 {
+		logger.WithField("node_id", r.nodeID).Warning("Not registered as active leader - stepping down")
+		return false
+	}
+	
+	return true
 }
 
 func (r *RaftElection) clearStaleLeaders() {
@@ -647,7 +792,8 @@ func (r *RaftElection) becomeFollowerUnsafe(term int64) {
 			"term":    r.currentTerm,
 		}).Info("Became follower")
 		
-		r.updateNodeInfo(false)
+		// Don't call updateNodeInfo or notifyCallbacks while holding lock
+		// These will be called by the caller after releasing the lock
 		r.notifyCallbacks()
 	}
 }
@@ -682,12 +828,17 @@ func (r *RaftElection) resetElectionTimer() {
 }
 
 func (r *RaftElection) updateNodeInfo(isLeader bool) {
+	r.mu.RLock()
+	currentTerm := r.currentTerm
+	r.mu.RUnlock()
+	
 	nodeInfo := &storage.NodeInfo{
 		ID:          r.nodeID,
 		Address:     "localhost:8080",
 		IsLeader:    isLeader,
 		WorkerCount: 10,
 		Version:     "1.0.0",
+		Term:        currentTerm, // Always include current term
 	}
 	
 	if err := r.storage.RegisterNode(r.ctx, nodeInfo); err != nil {
