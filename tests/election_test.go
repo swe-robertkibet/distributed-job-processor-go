@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -38,6 +39,11 @@ func setupTestStorage(t *testing.T) (*storage.MongoStorage, func()) {
 	}
 
 	cleanup := func() {
+		// Clear test data before closing
+		if mongoStorage != nil {
+			ctx := context.Background()
+			mongoStorage.ClearAllNodes(ctx) // Clear all node registrations
+		}
 		mongoStorage.Close()
 	}
 
@@ -219,6 +225,10 @@ func TestMultipleNodeElection(t *testing.T) {
 
 	for _, algorithm := range algorithms {
 		t.Run(algorithm, func(t *testing.T) {
+			// Clean any existing node data before starting this algorithm test
+			ctx := context.Background()
+			mongoStorage.ClearAllNodes(ctx)
+			
 			factory := election.NewElectionFactory()
 
 			nodes := make([]election.Election, 3)
@@ -253,6 +263,16 @@ func TestMultipleNodeElection(t *testing.T) {
 			for _, node := range nodes {
 				node.Stop()
 			}
+			
+			// Give time for all nodes to fully stop and release connections
+			time.Sleep(200 * time.Millisecond)
+			
+			// Clean up after this algorithm test
+			cleanupCtx := context.Background()
+			mongoStorage.ClearAllNodes(cleanupCtx)
+			
+			// Give time for cleanup to complete before next test
+			time.Sleep(300 * time.Millisecond)
 
 			if algorithm == "raft" {
 				assert.LessOrEqual(t, leaderCount, 1, "Should have at most one leader in Raft")

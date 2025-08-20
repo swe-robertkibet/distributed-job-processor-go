@@ -2,6 +2,7 @@ package election
 
 import (
 	"context"
+	"math/rand"
 	"sync"
 	"time"
 
@@ -10,17 +11,18 @@ import (
 )
 
 type BullyElection struct {
-	nodeID     string
-	nodeAddr   string
-	nodes      map[string]*Node
-	isLeader   bool
-	storage    *storage.MongoStorage
-	timeout    time.Duration
-	interval   time.Duration
-	mu         sync.RWMutex
-	ctx        context.Context
-	cancel     context.CancelFunc
-	callbacks  []LeadershipCallback
+	nodeID       string
+	nodeAddr     string
+	nodes        map[string]*Node
+	isLeader     bool
+	storage      *storage.MongoStorage
+	timeout      time.Duration
+	interval     time.Duration
+	mu           sync.RWMutex
+	ctx          context.Context
+	cancel       context.CancelFunc
+	callbacks    []LeadershipCallback
+	leadershipCh chan bool
 }
 
 type Node struct {
@@ -39,15 +41,16 @@ func NewBullyElection(nodeID string, storage *storage.MongoStorage, timeout, int
 	nodeAddr := generateNodeAddress(nodeID)
 	
 	return &BullyElection{
-		nodeID:   nodeID,
-		nodeAddr: nodeAddr,
-		nodes:    make(map[string]*Node),
-		isLeader: false,
-		storage:  storage,
-		timeout:  timeout,
-		interval: interval,
-		ctx:      ctx,
-		cancel:   cancel,
+		nodeID:       nodeID,
+		nodeAddr:     nodeAddr,
+		nodes:        make(map[string]*Node),
+		isLeader:     false,
+		storage:      storage,
+		timeout:      timeout,
+		interval:     interval,
+		ctx:          ctx,
+		cancel:       cancel,
+		leadershipCh: make(chan bool, 1),
 	}
 }
 
@@ -82,17 +85,14 @@ func (b *BullyElection) GetLeader() string {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	
-	for _, node := range b.nodes {
-		if node.Priority == b.getHighestPriority() {
-			return node.ID
-		}
-	}
-	
+	// First check if we're the leader
 	if b.isLeader {
 		return b.nodeID
 	}
 	
-	return ""
+	// Check storage for current leader
+	currentLeader := b.getCurrentLeader()
+	return currentLeader
 }
 
 func (b *BullyElection) AddCallback(callback LeadershipCallback) {
@@ -100,6 +100,10 @@ func (b *BullyElection) AddCallback(callback LeadershipCallback) {
 }
 
 func (b *BullyElection) runElectionLoop() {
+	// Add initial random delay to prevent synchronized elections
+	initialDelay := time.Duration(rand.Intn(1000)) * time.Millisecond
+	time.Sleep(initialDelay)
+	
 	// Immediately perform initial election check
 	logger.WithField("node_id", b.nodeID).Info("Performing initial election check")
 	b.updateNodes()
@@ -181,18 +185,44 @@ func (b *BullyElection) checkLeadership() {
 
 	myPriority := b.calculatePriority(b.nodeID)
 	highestPriority := b.getHighestPriority()
+	currentLeader := b.getCurrentLeaderUnsafe()
 	
-	shouldBeLeader := myPriority >= highestPriority
+	// Fix: Proper logic for determining leadership eligibility
+	shouldBeLeader := false
+	
+	// If I have higher priority than anyone else, I should be leader
+	if myPriority > highestPriority {
+		shouldBeLeader = true
+	} else if myPriority == highestPriority {
+		// If I have equal priority to the highest, I should be leader only if:
+		// 1. There's no current leader, OR 
+		// 2. I'm already the leader (maintain leadership)
+		shouldBeLeader = (currentLeader == "" || currentLeader == b.nodeID)
+	}
+	
 	wasLeader := b.isLeader
 
 	logger.WithFields(map[string]interface{}{
 		"node_id": b.nodeID,
 		"my_priority": myPriority,
 		"highest_priority": highestPriority,
+		"current_leader": currentLeader,
 		"should_be_leader": shouldBeLeader,
 		"is_leader": b.isLeader,
 		"total_nodes": len(b.nodes),
 	}).Info("Election check")
+
+	// If there's already a leader with higher priority, step down
+	if currentLeader != "" && currentLeader != b.nodeID {
+		otherLeaderPriority := b.calculatePriority(currentLeader)
+		if otherLeaderPriority > myPriority {
+			if b.isLeader {
+				logger.WithField("node_id", b.nodeID).Info("Stepping down - higher priority leader exists")
+				b.stepDown()
+			}
+			return
+		}
+	}
 
 	if shouldBeLeader && !b.isLeader {
 		logger.WithField("node_id", b.nodeID).Info("Becoming leader!")
@@ -208,6 +238,9 @@ func (b *BullyElection) checkLeadership() {
 }
 
 func (b *BullyElection) becomeLeader() {
+	// First, clear any existing leaders to prevent conflicts
+	b.clearExistingLeaders()
+	
 	b.isLeader = true
 	logger.WithFields(map[string]interface{}{
 		"node_id": b.nodeID,
@@ -224,6 +257,8 @@ func (b *BullyElection) becomeLeader() {
 	
 	if err := b.storage.RegisterNode(b.ctx, nodeInfo); err != nil {
 		logger.WithError(err).Error("Failed to register as leader")
+		// If we can't register, don't claim leadership
+		b.isLeader = false
 	}
 }
 
@@ -294,8 +329,92 @@ func (b *BullyElection) getHighestPriority() int {
 	return highest
 }
 
+func (b *BullyElection) getCurrentLeader() string {
+	// Query storage directly for current leader (don't use b.nodes to avoid lock issues)
+	nodes, err := b.storage.GetNodes(b.ctx)
+	if err != nil {
+		return ""
+	}
+	
+	for _, nodeInfo := range nodes {
+		if nodeInfo.IsLeader && time.Since(nodeInfo.LastSeen) < b.timeout {
+			return nodeInfo.ID
+		}
+	}
+	
+	return ""
+}
+
+func (b *BullyElection) getCurrentLeaderUnsafe() string {
+	// Check who is currently registered as leader using cached node data
+	for _, node := range b.nodes {
+		if time.Since(node.LastSeen) < b.timeout {
+			// Query storage to see if this node is still claiming leadership
+			nodes, err := b.storage.GetNodes(b.ctx)
+			if err != nil {
+				continue
+			}
+			
+			for _, nodeInfo := range nodes {
+				if nodeInfo.ID == node.ID && nodeInfo.IsLeader && time.Since(nodeInfo.LastSeen) < b.timeout {
+					return nodeInfo.ID
+				}
+			}
+		}
+	}
+	
+	return ""
+}
+
+func (b *BullyElection) clearExistingLeaders() {
+	// Clear any stale leader registrations from lower priority nodes
+	nodes, err := b.storage.GetNodes(b.ctx)
+	if err != nil {
+		return
+	}
+	
+	myPriority := b.calculatePriority(b.nodeID)
+	
+	for _, nodeInfo := range nodes {
+		if nodeInfo.IsLeader && nodeInfo.ID != b.nodeID {
+			nodePriority := b.calculatePriority(nodeInfo.ID)
+			// Only clear leaders with lower priority
+			if nodePriority < myPriority {
+				logger.WithFields(map[string]interface{}{
+					"node_id": b.nodeID,
+					"clearing_leader": nodeInfo.ID,
+					"my_priority": myPriority,
+					"their_priority": nodePriority,
+				}).Info("Clearing lower priority leader")
+				
+				// Update their status to non-leader
+				updatedInfo := &storage.NodeInfo{
+					ID:          nodeInfo.ID,
+					Address:     nodeInfo.Address,
+					IsLeader:    false,
+					WorkerCount: nodeInfo.WorkerCount,
+					Version:     nodeInfo.Version,
+				}
+				b.storage.RegisterNode(b.ctx, updatedInfo)
+			}
+		}
+	}
+}
+
 func (b *BullyElection) notifyCallbacks() {
-	leaderID := b.GetLeader()
+	// Get leader ID without acquiring lock again (we're already in checkLeadership with lock held)
+	var leaderID string
+	for _, node := range b.nodes {
+		if node.Priority == b.getHighestPriority() {
+			leaderID = node.ID
+			break
+		}
+	}
+	
+	if leaderID == "" && b.isLeader {
+		leaderID = b.nodeID
+	}
+	
 	for _, callback := range b.callbacks {
 		go callback(b.isLeader, leaderID)
 	}

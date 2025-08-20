@@ -5,6 +5,7 @@ This comprehensive guide covers all testing approaches for the distributed job p
 ## 🚀 Quick Start
 
 ### Option 1: Docker Compose (Recommended)
+
 ```bash
 # Start with default Bully algorithm
 docker-compose up -d
@@ -18,6 +19,7 @@ chmod +x examples/curl_examples.sh
 ```
 
 ### Option 2: Automated Testing
+
 ```bash
 # Run all algorithm tests
 chmod +x scripts/test-algorithms.sh
@@ -30,6 +32,7 @@ chmod +x scripts/test-algorithms.sh
 ```
 
 ### Option 3: Local Development
+
 ```bash
 # Start local development environment
 chmod +x scripts/local-dev.sh
@@ -49,6 +52,7 @@ chmod +x scripts/local-dev.sh
 ### 1. Election Algorithm Testing
 
 #### Bully Algorithm (2-10 nodes)
+
 ```bash
 # Docker Compose
 docker-compose -f docker-compose.bully.yml up -d
@@ -63,6 +67,7 @@ docker-compose -f docker-compose.bully.yml up -d
 ```
 
 #### Raft Consensus (3-7 nodes)
+
 ```bash
 # Docker Compose
 docker-compose -f docker-compose.raft.yml up -d
@@ -77,6 +82,7 @@ docker-compose -f docker-compose.raft.yml up -d
 ```
 
 #### Gossip Election (5+ nodes)
+
 ```bash
 # Docker Compose
 docker-compose -f docker-compose.gossip.yml up -d
@@ -93,21 +99,25 @@ docker-compose -f docker-compose.gossip.yml up -d
 ### 2. Load Balancing Strategy Testing
 
 #### Round Robin
+
 ```bash
 LOAD_BALANCER_STRATEGY=round_robin docker-compose up -d
 ```
 
 #### Least Loaded
+
 ```bash
 LOAD_BALANCER_STRATEGY=least_loaded docker-compose up -d
 ```
 
 #### Random Distribution
+
 ```bash
 LOAD_BALANCER_STRATEGY=random docker-compose up -d
 ```
 
 #### Priority-based Scheduling
+
 ```bash
 LOAD_BALANCER_STRATEGY=priority docker-compose up -d
 ```
@@ -115,6 +125,7 @@ LOAD_BALANCER_STRATEGY=priority docker-compose up -d
 ### 3. Failover Testing
 
 #### Leader Failover
+
 ```bash
 # Start cluster
 docker-compose -f docker-compose.raft.yml up -d
@@ -131,6 +142,7 @@ docker-compose -f docker-compose.raft.yml start job-processor-1
 ```
 
 #### Network Partition Simulation
+
 ```bash
 # Start cluster
 docker-compose up -d
@@ -148,6 +160,7 @@ docker-compose start job-processor-2 job-processor-3
 ### 4. Performance Testing
 
 #### Load Testing with Jobs
+
 ```bash
 # Send multiple jobs
 ./scripts/local-dev.sh jobs 100 8080
@@ -160,6 +173,7 @@ curl http://localhost:9090/metrics | grep jobs_total
 ```
 
 #### Concurrent Client Testing
+
 ```bash
 # Start multiple job creators in parallel
 for i in {1..5}; do
@@ -173,6 +187,7 @@ done
 ### 5. Stress Testing
 
 #### High Job Volume
+
 ```bash
 # Create test script for high volume
 cat << 'EOF' > stress_test.sh
@@ -181,7 +196,7 @@ for i in {1..1000}; do
   curl -X POST http://localhost:8080/api/v1/jobs \
     -H "Content-Type: application/json" \
     -d "{\"type\":\"test\",\"priority\":$((RANDOM%10+1)),\"payload\":{\"id\":$i}}" &
-  
+
   if [ $((i % 50)) -eq 0 ]; then
     wait  # Wait for batch to complete
     echo "Sent $i jobs..."
@@ -195,6 +210,7 @@ chmod +x stress_test.sh
 ```
 
 #### Rapid Node Changes
+
 ```bash
 # Script to rapidly start/stop nodes
 while true; do
@@ -208,6 +224,7 @@ done
 ## 🔍 Monitoring and Debugging
 
 ### Real-time Monitoring
+
 ```bash
 # Interactive dashboard
 ./scripts/monitor.sh
@@ -223,6 +240,7 @@ done
 ```
 
 ### Debugging Tools
+
 ```bash
 # Full diagnostic report
 ./scripts/debug.sh
@@ -237,6 +255,7 @@ done
 ### API Endpoints for Testing
 
 #### Election Information
+
 ```bash
 # Current election status
 curl http://localhost:8080/api/v1/election | jq
@@ -249,6 +268,7 @@ curl http://localhost:8080/api/v1/cluster | jq
 ```
 
 #### Job Management
+
 ```bash
 # Create job
 curl -X POST http://localhost:8080/api/v1/jobs \
@@ -263,6 +283,7 @@ curl http://localhost:8080/api/v1/jobs/{job_id} | jq
 ```
 
 #### System Statistics
+
 ```bash
 # Overall stats
 curl http://localhost:8080/api/v1/stats | jq
@@ -277,6 +298,7 @@ curl http://localhost:8080/api/v1/nodes | jq
 ## 🧪 Unit and Integration Tests
 
 ### Running Go Tests
+
 ```bash
 # All tests
 go test ./tests/...
@@ -299,18 +321,21 @@ go test ./tests/ -bench=. -benchtime=5s
 ### Test Categories
 
 #### Unit Tests
+
 - Load balancing algorithm logic
 - Retry policy calculations
 - Job state transitions
 - Authentication and authorization
 
 #### Integration Tests
+
 - Multi-node election scenarios
 - Job processing workflows
 - API endpoint functionality
 - Database interactions
 
 #### Performance Tests
+
 - Election algorithm performance
 - Job processing throughput
 - API response times
@@ -321,7 +346,7 @@ go test ./tests/ -bench=. -benchtime=5s
 ### Election Convergence Times
 
 | Algorithm | Cluster Size | Expected Time | Network Messages |
-|-----------|--------------|---------------|------------------|
+| --------- | ------------ | ------------- | ---------------- |
 | Bully     | 3 nodes      | 1-3 seconds   | O(n²)            |
 | Raft      | 3 nodes      | 2-5 seconds   | O(n)             |
 | Gossip    | 5 nodes      | 5-15 seconds  | O(log n)         |
@@ -329,12 +354,14 @@ go test ./tests/ -bench=. -benchtime=5s
 ### Performance Baselines
 
 #### Single Node
+
 - **Job Throughput**: 100-500 jobs/second
 - **API Response**: < 100ms
 - **Memory Usage**: < 100MB
 - **CPU Usage**: < 50%
 
 #### Three Node Cluster
+
 - **Job Throughput**: 200-1000 jobs/second
 - **Election Time**: < 10 seconds
 - **Failover Time**: < 30 seconds
@@ -342,6 +369,7 @@ go test ./tests/ -bench=. -benchtime=5s
 ## 🔧 Troubleshooting Common Issues
 
 ### No Leader Elected
+
 ```bash
 # Check node connectivity
 ./scripts/debug.sh network
@@ -354,6 +382,7 @@ go test ./tests/ -bench=. -benchtime=5s
 ```
 
 ### Jobs Not Processing
+
 ```bash
 # Check worker registration
 curl http://localhost:8080/api/v1/workers
@@ -366,6 +395,7 @@ curl http://localhost:8080/api/v1/stats | jq '.queue'
 ```
 
 ### High Latency
+
 ```bash
 # Check system resources
 docker stats
@@ -378,6 +408,7 @@ ping localhost
 ```
 
 ### Split Brain Detection
+
 ```bash
 # Check multiple leaders
 for port in 8080 8081 8082; do
@@ -389,18 +420,21 @@ done
 ## 🎯 Test Scenarios by Use Case
 
 ### Development Testing
+
 1. Single node with Bully algorithm
 2. Basic job creation and processing
 3. API endpoint validation
 4. Unit test execution
 
 ### Staging Testing
+
 1. Three node Raft cluster
 2. Failover scenarios
 3. Load testing with moderate volume
 4. Integration test suite
 
 ### Production Simulation
+
 1. Five node Gossip cluster
 2. High availability testing
 3. Stress testing with high job volume
@@ -410,19 +444,20 @@ done
 ## 📚 Additional Resources
 
 ### Configuration Examples
+
 - See `examples/election_algorithms.md` for detailed configuration
 - Check `docker-compose.*.yml` files for deployment examples
 - Review `.env` file for environment variables
 
 ### Monitoring
+
 - Grafana dashboards: http://localhost:3000 (admin/admin)
 - Prometheus metrics: http://localhost:9090
 - Application logs: `docker-compose logs -f`
 
 ### API Documentation
+
 - Health endpoint: `GET /health`
 - Election status: `GET /api/v1/election`
 - Job management: `POST /api/v1/jobs`
 - System stats: `GET /api/v1/stats`
-
-This testing guide provides comprehensive coverage for validating the distributed job processor across all supported algorithms and deployment scenarios.

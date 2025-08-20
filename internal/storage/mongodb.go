@@ -326,3 +326,12 @@ func (m *MongoStorage) GetNodes(ctx context.Context) ([]*NodeInfo, error) {
 
 	return nodes, cursor.Err()
 }
+
+func (m *MongoStorage) ClearAllNodes(ctx context.Context) error {
+	// Delete all node registrations to clean up test data
+	_, err := m.nodes.DeleteMany(ctx, bson.M{})
+	if err != nil {
+		return fmt.Errorf("failed to clear all nodes: %w", err)
+	}
+	return nil
+}
